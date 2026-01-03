@@ -1,0 +1,72 @@
+name: Convert YAML rules to MRS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "rules/*.yaml"
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2️⃣ 安装依赖
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # 3️⃣ 下载 mihomo
+      - name: Download mihomo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "📦 Fetching latest mihomo version..."
+          VERSION=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | \
+            jq -r '.tag_name')
+
+          echo "➡️ Version: $VERSION"
+          wget -q https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz
+          gunzip mihomo-linux-amd64-${VERSION}.gz
+          mv mihomo-linux-amd64-${VERSION} mihomo
+          chmod +x mihomo
+          ./mihomo -v
+
+      # 4️⃣ 转换 YAML → MRS
+      - name: Convert YAML to MRS
+        run: |
+          set -e
+          mkdir -p rules_mrs
+
+          for file in rules/*.yaml; do
+            name=$(basename "$file" .yaml)
+            out="rules_mrs/${name}.mrs"
+
+            echo "🔄 Converting $file -> $out"
+            ./mihomo convert-ruleset domain yaml "$file" "$out"
+          done
+
+          echo "✅ Conversion finished"
+          ls -lh rules_mrs
+
+      # 5️⃣ 提交结果
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add rules_mrs
+
+          if git diff --staged --quiet; then
+            echo "📝 No changes to commit"
+          else
+            git commit -m "chore: convert YAML rules to MRS"
+            git push
+          fi

@@ -59,9 +59,20 @@ jobs:
           file_count=$(find rules -name "*.yaml" | wc -l)
           echo "📁 Found $file_count YAML files to convert"
           
+          # 检查 mihomo 是否可执行
+          if [ ! -x ./mihomo ]; then
+            echo "❌ Error: mihomo binary not found or not executable"
+            exit 1
+          fi
+          
+          echo "ℹ️ mihomo version:"
+          ./mihomo -v
+          echo ""
+          
           # 转换文件
           success_count=0
           fail_count=0
+          failed_files=()
           
           for file in rules/*.yaml; do
             if [ ! -f "$file" ]; then
@@ -72,27 +83,54 @@ jobs:
             name=$(basename "$file" .yaml)
             out="rules_mrs/${name}.mrs"
             
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "🔄 Converting: $name"
-            if ./mihomo convert-ruleset domain yaml "$file" "$out"; then
-              ((success_count++))
-              size=$(du -h "$out" | cut -f1)
-              echo "  ✅ Success ($size)"
+            echo "  Input:  $file"
+            echo "  Output: $out"
+            
+            # 显示 YAML 文件的前几行用于调试
+            echo "  Preview (first 5 lines):"
+            head -n 5 "$file" | sed 's/^/    /'
+            echo ""
+            
+            # 执行转换，捕获输出
+            if ./mihomo convert-ruleset domain yaml "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}.txt; then
+              if [ -f "$out" ] && [ -s "$out" ]; then
+                ((success_count++))
+                size=$(du -h "$out" | cut -f1)
+                lines=$(wc -l < "$out")
+                echo "  ✅ Success: $size, $lines lines"
+              else
+                ((fail_count++))
+                failed_files+=("$name (output file empty or missing)")
+                echo "  ❌ Failed: Output file is empty or not created"
+              fi
             else
               ((fail_count++))
-              echo "  ❌ Failed"
+              failed_files+=("$name")
+              echo "  ❌ Failed with error:"
+              cat /tmp/convert_log_${name}.txt | sed 's/^/    /'
             fi
+            echo ""
           done
           
-          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📊 Conversion Summary:"
           echo "  - Total: $file_count"
           echo "  - Success: $success_count"
           echo "  - Failed: $fail_count"
           
           if [ $fail_count -gt 0 ]; then
+            echo ""
+            echo "❌ Failed files:"
+            for failed in "${failed_files[@]}"; do
+              echo "  - $failed"
+            done
             exit 1
           fi
           
+          echo ""
+          echo "📂 Generated files:"
           ls -lh rules_mrs/
 
       # 5️⃣ 提交结果

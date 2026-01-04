@@ -1,5 +1,4 @@
 name: Convert YAML rules to MRS
-
 permissions:
   contents: write
 
@@ -8,7 +7,6 @@ on:
   push:
     paths:
       - "rules/*.yaml"
-
 jobs:
   convert:
     runs-on: ubuntu-latest
@@ -18,175 +16,47 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # 2️⃣ 缓存 mihomo 二进制文件
-      - name: Cache mihomo binary
-        id: cache-mihomo
-        uses: actions/cache@v4
-        with:
-          path: mihomo
-          key: mihomo-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
-          restore-keys: |
-            mihomo-${{ runner.os }}-
-
-      # 3️⃣ 下载 mihomo（仅在缓存未命中时）
+      # 2️⃣ 安装依赖
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      # 3️⃣ 下载 mihomo
       - name: Download mihomo
-        if: steps.cache-mihomo.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           echo "📦 Fetching latest mihomo version..."
-          
-          # 使用 GitHub CLI 获取最新版本
-          VERSION=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
+          VERSION=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | \
+            jq -r '.tag_name')
           echo "➡️ Version: $VERSION"
-          
-          # 下载并解压
-          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz" | \
-            gunzip > mihomo
-          
+          wget -q https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz
+          gunzip mihomo-linux-amd64-${VERSION}.gz
+          mv mihomo-linux-amd64-${VERSION} mihomo
           chmod +x mihomo
           ./mihomo -v
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       # 4️⃣ 转换 YAML → MRS
       - name: Convert YAML to MRS
         run: |
-          echo "🔄 Converting YAML rules to MRS format..."
+          set -e
           mkdir -p rules_mrs
-          
-          # 检查 mihomo
-          if [ ! -x ./mihomo ]; then
-            echo "❌ Error: mihomo binary not found or not executable"
-            exit 1
-          fi
-          
-          echo "ℹ️ mihomo version:"
-          ./mihomo -v
-          echo ""
-          
-          # 定义转换函数
-          convert_file() {
-            local file="$1"
-            local filename=$(basename "$file")
-            local name="${filename%.*}"
-            local output_file="rules_mrs/${name}.mrs"
-            
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📄 Converting: $filename"
-            echo "  Input:  $file"
-            echo "  Output: $output_file"
-            
-            # 显示文件预览
-            echo "  Preview (first 5 lines):"
-            head -n 5 "$file" | sed 's/^/    /'
-            echo ""
-            
-            # 执行转换并捕获所有输出
-            echo "  Executing: mihomo convert-ruleset domain yaml"
-            local log_file="/tmp/convert_${name}.log"
-            
-            if ./mihomo convert-ruleset domain yaml "$file" "$output_file" > "$log_file" 2>&1; then
-              # 检查输出文件
-              if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-                # 获取文件大小
-                local size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
-                local size_formatted=$(numfmt --to=iec-i --suffix=B "$size" 2>/dev/null || echo "${size}B")
-                echo "  ✅ Success: $size_formatted"
-                
-                # 显示转换输出（如果有）
-                if [ -s "$log_file" ]; then
-                  echo "  Conversion output:"
-                  cat "$log_file" | sed 's/^/    /'
-                fi
-                return 0
-              else
-                echo "  ❌ Failed: output file is empty or not created"
-                if [ -f "$log_file" ]; then
-                  echo "  Conversion output:"
-                  cat "$log_file" | sed 's/^/    /'
-                fi
-                return 1
-              fi
-            else
-              echo "  ❌ Failed: conversion command returned error"
-              if [ -f "$log_file" ]; then
-                echo "  Error details:"
-                cat "$log_file" | sed 's/^/    /'
-              fi
-              return 1
-            fi
-          }
-          
-          # 转换所有文件并统计结果
-          success=0
-          failed=0
-          failed_files=()
-          
           for file in rules/*.yaml; do
-            # 检查文件是否存在（处理没有匹配文件的情况）
-            if [ ! -f "$file" ]; then
-              echo "⚠️ No YAML files found in rules/ directory"
-              break
-            fi
-            
-            if convert_file "$file"; then
-              ((success++))
-            else
-              ((failed++))
-              failed_files+=("$(basename "$file")")
-            fi
-            echo ""
+            name=$(basename "$file" .yaml)
+            out="rules_mrs/${name}.mrs"
+            echo "🔄 Converting $file -> $out"
+            ./mihomo convert-ruleset domain yaml "$file" "$out"
           done
-          
-          # 汇总报告
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 Conversion Summary:"
-          echo "  ✅ Success: $success"
-          echo "  ❌ Failed:  $failed"
-          
-          if [ $failed -gt 0 ]; then
-            echo ""
-            echo "❌ Failed files:"
-            for f in "${failed_files[@]}"; do
-              echo "  - $f"
-            done
-            echo ""
-            echo "💡 Tip: Check the error details above for each failed file"
-            exit 1
-          fi
-          
-          if [ $success -gt 0 ]; then
-            echo ""
-            echo "📂 Generated files:"
-            ls -lh rules_mrs/
-            echo ""
-            echo "📊 Total size:"
-            du -sh rules_mrs/
-          else
-            echo ""
-            echo "⚠️ No files were converted"
-            exit 1
-          fi
-
+          echo "✅ Conversion finished"
+          ls -lh rules_mrs
       # 5️⃣ 提交结果
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
           git add rules_mrs
-          
           if git diff --staged --quiet; then
             echo "📝 No changes to commit"
-            exit 0
+          else
+            git commit -m "chore: convert YAML rules to MRS"
+            git push
           fi
-          
-          # 生成更详细的提交信息
-          changed_files=$(git diff --staged --name-only rules_mrs | wc -l)
-          git commit -m "chore: convert YAML rules to MRS" \
-                     -m "" \
-                     -m "- Updated $changed_files MRS file(s)" \
-                     -m "- Auto-generated by GitHub Actions"
-          
-          git push
-          echo "✅ Changes pushed successfully"

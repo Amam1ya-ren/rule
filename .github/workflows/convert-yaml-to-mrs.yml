@@ -33,10 +33,9 @@ jobs:
       - name: Download mihomo
         if: steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
-          set -euo pipefail
           echo "📦 Fetching latest mihomo version..."
           
-          # 使用 GitHub CLI 获取最新版本（更可靠）
+          # 使用 GitHub CLI 获取最新版本
           VERSION=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
           echo "➡️ Version: $VERSION"
           
@@ -52,14 +51,10 @@ jobs:
       # 4️⃣ 转换 YAML → MRS
       - name: Convert YAML to MRS
         run: |
-          set -euo pipefail
+          echo "🔄 Converting YAML rules to MRS format..."
           mkdir -p rules_mrs
           
-          # 统计文件数量
-          file_count=$(find rules -name "*.yaml" | wc -l)
-          echo "📁 Found $file_count YAML files to convert"
-          
-          # 检查 mihomo 是否可执行
+          # 检查 mihomo
           if [ ! -x ./mihomo ]; then
             echo "❌ Error: mihomo binary not found or not executable"
             exit 1
@@ -69,73 +64,109 @@ jobs:
           ./mihomo -v
           echo ""
           
-          # 转换文件
-          success_count=0
-          fail_count=0
-          failed_files=()
-          
-          for file in rules/*.yaml; do
-            if [ ! -f "$file" ]; then
-              echo "⚠️ No YAML files found in rules/ directory"
-              continue
-            fi
-            
-            name=$(basename "$file" .yaml)
-            out="rules_mrs/${name}.mrs"
+          # 定义转换函数
+          convert_file() {
+            local file="$1"
+            local filename=$(basename "$file")
+            local name="${filename%.*}"
+            local output_file="rules_mrs/${name}.mrs"
             
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "🔄 Converting: $name"
+            echo "📄 Converting: $filename"
             echo "  Input:  $file"
-            echo "  Output: $out"
+            echo "  Output: $output_file"
             
-            # 显示 YAML 文件的前几行用于调试
+            # 显示文件预览
             echo "  Preview (first 5 lines):"
             head -n 5 "$file" | sed 's/^/    /'
             echo ""
             
-            # 执行转换（根据文档，使用 domain yaml 格式）
-            # 临时禁用 errexit 以捕获错误
-            set +e
-            ./mihomo convert-ruleset domain yaml "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}.txt
-            exit_code=$?
-            set -e
+            # 执行转换并捕获所有输出
+            echo "  Executing: mihomo convert-ruleset domain yaml"
+            local log_file="/tmp/convert_${name}.log"
             
-            # 检查结果
-            if [ $exit_code -eq 0 ] && [ -f "$out" ] && [ -s "$out" ]; then
-              ((success_count++))
-              size=$(du -h "$out" | cut -f1)
-              lines=$(wc -l < "$out" 2>/dev/null || echo "N/A")
-              echo "  ✅ Success: $size, $lines lines"
-            else
-              ((fail_count++))
-              failed_files+=("$name")
-              echo "  ❌ Failed (exit code: $exit_code)"
-              if [ -f "/tmp/convert_log_${name}.txt" ]; then
-                echo "  Error output:"
-                cat /tmp/convert_log_${name}.txt | sed 's/^/    /'
+            if ./mihomo convert-ruleset domain yaml "$file" "$output_file" > "$log_file" 2>&1; then
+              # 检查输出文件
+              if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+                # 获取文件大小
+                local size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
+                local size_formatted=$(numfmt --to=iec-i --suffix=B "$size" 2>/dev/null || echo "${size}B")
+                echo "  ✅ Success: $size_formatted"
+                
+                # 显示转换输出（如果有）
+                if [ -s "$log_file" ]; then
+                  echo "  Conversion output:"
+                  cat "$log_file" | sed 's/^/    /'
+                fi
+                return 0
+              else
+                echo "  ❌ Failed: output file is empty or not created"
+                if [ -f "$log_file" ]; then
+                  echo "  Conversion output:"
+                  cat "$log_file" | sed 's/^/    /'
+                fi
+                return 1
               fi
+            else
+              echo "  ❌ Failed: conversion command returned error"
+              if [ -f "$log_file" ]; then
+                echo "  Error details:"
+                cat "$log_file" | sed 's/^/    /'
+              fi
+              return 1
+            fi
+          }
+          
+          # 转换所有文件并统计结果
+          success=0
+          failed=0
+          failed_files=()
+          
+          for file in rules/*.yaml; do
+            # 检查文件是否存在（处理没有匹配文件的情况）
+            if [ ! -f "$file" ]; then
+              echo "⚠️ No YAML files found in rules/ directory"
+              break
+            fi
+            
+            if convert_file "$file"; then
+              ((success++))
+            else
+              ((failed++))
+              failed_files+=("$(basename "$file")")
             fi
             echo ""
           done
           
+          # 汇总报告
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📊 Conversion Summary:"
-          echo "  - Total: $file_count"
-          echo "  - Success: $success_count"
-          echo "  - Failed: $fail_count"
+          echo "  ✅ Success: $success"
+          echo "  ❌ Failed:  $failed"
           
-          if [ $fail_count -gt 0 ]; then
+          if [ $failed -gt 0 ]; then
             echo ""
             echo "❌ Failed files:"
-            for failed in "${failed_files[@]}"; do
-              echo "  - $failed"
+            for f in "${failed_files[@]}"; do
+              echo "  - $f"
             done
+            echo ""
+            echo "💡 Tip: Check the error details above for each failed file"
             exit 1
           fi
           
-          echo ""
-          echo "📂 Generated files:"
-          ls -lh rules_mrs/
+          if [ $success -gt 0 ]; then
+            echo ""
+            echo "📂 Generated files:"
+            ls -lh rules_mrs/
+            echo ""
+            echo "📊 Total size:"
+            du -sh rules_mrs/
+          else
+            echo ""
+            echo "⚠️ No files were converted"
+            exit 1
+          fi
 
       # 5️⃣ 提交结果
       - name: Commit and push

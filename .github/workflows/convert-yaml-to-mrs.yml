@@ -69,6 +69,11 @@ jobs:
           ./mihomo -v
           echo ""
           
+          # 显示 convert-ruleset 帮助信息（用于调试）
+          echo "ℹ️ Available convert-ruleset options:"
+          ./mihomo convert-ruleset --help 2>&1 | head -n 20 || echo "  (help not available)"
+          echo ""
+          
           # 转换文件
           success_count=0
           fail_count=0
@@ -89,27 +94,72 @@ jobs:
             echo "  Output: $out"
             
             # 显示 YAML 文件的前几行用于调试
-            echo "  Preview (first 5 lines):"
-            head -n 5 "$file" | sed 's/^/    /'
+            echo "  Preview (first 10 lines):"
+            head -n 10 "$file" | sed 's/^/    /'
             echo ""
             
-            # 执行转换，捕获输出
-            if ./mihomo convert-ruleset domain yaml "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}.txt; then
+            # 尝试多种转换方式
+            converted=false
+            
+            # 方法 1: domain yaml (标准 Clash 规则集)
+            echo "  🔸 Trying: domain yaml format"
+            if ./mihomo convert-ruleset domain yaml "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}_1.txt; then
               if [ -f "$out" ] && [ -s "$out" ]; then
-                ((success_count++))
-                size=$(du -h "$out" | cut -f1)
-                lines=$(wc -l < "$out")
-                echo "  ✅ Success: $size, $lines lines"
-              else
-                ((fail_count++))
-                failed_files+=("$name (output file empty or missing)")
-                echo "  ❌ Failed: Output file is empty or not created"
+                echo "    ✅ Success with domain yaml"
+                converted=true
               fi
+            fi
+            
+            # 方法 2: domain text (纯文本域名列表)
+            if [ "$converted" = false ]; then
+              echo "  🔸 Trying: domain text format"
+              if ./mihomo convert-ruleset domain text "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}_2.txt; then
+                if [ -f "$out" ] && [ -s "$out" ]; then
+                  echo "    ✅ Success with domain text"
+                  converted=true
+                fi
+              fi
+            fi
+            
+            # 方法 3: domain mrs (MRS 输入格式)
+            if [ "$converted" = false ]; then
+              echo "  🔸 Trying: domain mrs format"
+              if ./mihomo convert-ruleset domain mrs "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}_3.txt; then
+                if [ -f "$out" ] && [ -s "$out" ]; then
+                  echo "    ✅ Success with domain mrs"
+                  converted=true
+                fi
+              fi
+            fi
+            
+            # 方法 4: classical yaml (经典规则集格式)
+            if [ "$converted" = false ]; then
+              echo "  🔸 Trying: classical yaml format"
+              if ./mihomo convert-ruleset classical yaml "$file" "$out" 2>&1 | tee /tmp/convert_log_${name}_4.txt; then
+                if [ -f "$out" ] && [ -s "$out" ]; then
+                  echo "    ✅ Success with classical yaml"
+                  converted=true
+                fi
+              fi
+            fi
+            
+            # 检查结果
+            if [ "$converted" = true ]; then
+              ((success_count++))
+              size=$(du -h "$out" | cut -f1)
+              lines=$(wc -l < "$out")
+              echo "  ✅ Final result: $size, $lines lines"
             else
               ((fail_count++))
               failed_files+=("$name")
-              echo "  ❌ Failed with error:"
-              cat /tmp/convert_log_${name}.txt | sed 's/^/    /'
+              echo "  ❌ All conversion methods failed"
+              echo "  Error logs:"
+              for i in 1 2 3 4; do
+                if [ -f "/tmp/convert_log_${name}_${i}.txt" ]; then
+                  echo "    --- Method $i ---"
+                  tail -n 5 /tmp/convert_log_${name}_${i}.txt | sed 's/^/    /'
+                fi
+              done
             fi
             echo ""
           done

@@ -1,4 +1,5 @@
 name: Convert YAML rules to MRS
+
 permissions:
   contents: write
 
@@ -7,6 +8,7 @@ on:
   push:
     paths:
       - "rules/*.yaml"
+
 jobs:
   convert:
     runs-on: ubuntu-latest
@@ -16,11 +18,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       # 2️⃣ 安装依赖
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
-      # 3️⃣ 下载 mihomo
+
+      # 3️⃣ 缓存 mihomo 二进制文件
+      - name: Cache mihomo binary
+        id: cache-mihomo
+        uses: actions/cache@v4
+        with:
+          path: mihomo
+          key: mihomo-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            mihomo-${{ runner.os }}-
+
+      # 4️⃣ 下载 mihomo（仅在缓存未命中时）
       - name: Download mihomo
+        if: steps.cache-mihomo.outputs.cache-hit != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -35,7 +50,8 @@ jobs:
           mv mihomo-linux-amd64-${VERSION} mihomo
           chmod +x mihomo
           ./mihomo -v
-      # 4️⃣ 转换 YAML → MRS
+
+      # 5️⃣ 转换 YAML → MRS
       - name: Convert YAML to MRS
         run: |
           set -e
@@ -48,7 +64,8 @@ jobs:
           done
           echo "✅ Conversion finished"
           ls -lh rules_mrs
-      # 5️⃣ 提交结果
+
+      # 6️⃣ 提交结果
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"

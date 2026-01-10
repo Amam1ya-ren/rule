@@ -14,7 +14,7 @@ on:
       - "rules/*.yaml"
 
 env:
-  MIHOMO_VERSION: v1.19.19
+  MIHOMO_VERSION: v1.19.18
 
 jobs:
   convert:

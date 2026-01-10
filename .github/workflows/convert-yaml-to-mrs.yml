@@ -3,77 +3,89 @@ name: Convert YAML rules to MRS
 permissions:
   contents: write
 
+# 新 push 会取消旧的运行，避免排队等待
+concurrency:
+  group: rules-convert
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:
     paths:
       - "rules/*.yaml"
 
+env:
+  # 固定 mihomo 版本，避免 API + cache 失效
+  MIHOMO_VERSION: v1.19.0
+
 jobs:
   convert:
     runs-on: ubuntu-latest
+
     steps:
-      # 1️⃣ Checkout
+      # 1️⃣ Checkout（只取必要历史）
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
-      # 2️⃣ 安装依赖
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      # 3️⃣ 缓存 mihomo 二进制文件
+      # 2️⃣ 缓存 mihomo 二进制
       - name: Cache mihomo binary
         id: cache-mihomo
         uses: actions/cache@v4
         with:
           path: mihomo
-          key: mihomo-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
-          restore-keys: |
-            mihomo-${{ runner.os }}-
+          key: mihomo-${{ runner.os }}-${{ env.MIHOMO_VERSION }}
 
-      # 4️⃣ 下载 mihomo（仅在缓存未命中时）
+      # 3️⃣ 下载 mihomo（仅 cache miss）
       - name: Download mihomo
         if: steps.cache-mihomo.outputs.cache-hit != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          echo "📦 Fetching latest mihomo version..."
-          VERSION=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | \
-            jq -r '.tag_name')
-          echo "➡️ Version: $VERSION"
-          wget -q https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz
-          gunzip mihomo-linux-amd64-${VERSION}.gz
-          mv mihomo-linux-amd64-${VERSION} mihomo
+          echo "📦 Downloading mihomo $MIHOMO_VERSION"
+          wget -q https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz
+          gunzip mihomo-linux-amd64-${MIHOMO_VERSION}.gz
+          mv mihomo-linux-amd64-${MIHOMO_VERSION} mihomo
           chmod +x mihomo
           ./mihomo -v
 
-      # 5️⃣ 转换 YAML → MRS
-      - name: Convert YAML to MRS
+      # 4️⃣ 仅转换变动的 rules
+      - name: Convert changed YAML rules to MRS
         run: |
           set -e
           mkdir -p rules_mrs
-          for file in rules/*.yaml; do
+
+          # 只处理本次提交中变动的 rules
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- rules/*.yaml || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "🟢 No rule changes detected"
+            exit 0
+          fi
+
+          for file in $CHANGED_FILES; do
             name=$(basename "$file" .yaml)
             out="rules_mrs/${name}.mrs"
-            echo "🔄 Converting $file -> $out"
+            echo "🔄 $file -> $out"
             ./mihomo convert-ruleset domain yaml "$file" "$out"
           done
+
           echo "✅ Conversion finished"
           ls -lh rules_mrs
 
-      # 6️⃣ 提交结果
+      # 5️⃣ 提交并推送结果
       - name: Commit and push
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add rules_mrs
+
           if git diff --staged --quiet; then
             echo "📝 No changes to commit"
-          else
-            git commit -m "chore: convert YAML rules to MRS"
-            git push
+            exit 0
           fi
+
+          git commit -m "chore: convert YAML rules to MRS"
+          git push

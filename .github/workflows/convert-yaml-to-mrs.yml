@@ -16,7 +16,7 @@ on:
 
 env:
   # 固定 mihomo 版本，避免 API + cache 失效
-  MIHOMO_VERSION: v1.19.0
+  MIHOMO_VERSION: v1.19.18
 
 jobs:
   convert:

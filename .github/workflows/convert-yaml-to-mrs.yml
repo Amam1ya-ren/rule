@@ -3,7 +3,6 @@ name: Convert YAML rules to MRS
 permissions:
   contents: write
 
-# 连续 push 自动取消旧任务
 concurrency:
   group: rules-convert
   cancel-in-progress: true
@@ -15,21 +14,18 @@ on:
       - "rules/*.yaml"
 
 env:
-  # 固定版本，避免 API / cache 乱跳
-  MIHOMO_VERSION: v1.19.18
+  MIHOMO_VERSION: v1.19.19
 
 jobs:
   convert:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout（足够 diff 用）
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      # 2️⃣ 缓存 mihomo
       - name: Cache mihomo binary
         id: cache-mihomo
         uses: actions/cache@v4
@@ -37,78 +33,59 @@ jobs:
           path: mihomo
           key: mihomo-${{ runner.os }}-${{ env.MIHOMO_VERSION }}
 
-      # 3️⃣ 下载 mihomo（仅 cache miss）
       - name: Download mihomo
         if: steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
           set -e
-          echo "📦 Downloading mihomo ${MIHOMO_VERSION}"
           wget -q https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           gunzip mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           mv mihomo-linux-amd64-${MIHOMO_VERSION} mihomo
           chmod +x mihomo
-          ./mihomo -v
 
-      # 4️⃣ 处理新增 / 修改 / 删除 / 重命名（关键）
-      - name: Sync rules_mrs with rules (A/M/D/R supported)
+      # ⭐ 核心：增量 + 自愈
+      - name: Sync rules_mrs with rules (self-healing)
         run: |
           set -e
           mkdir -p rules_mrs
 
-          # 取变更类型：A M D R
-          git diff --name-status HEAD~1 HEAD -- rules/*.yaml > /tmp/rule_changes.txt || true
+          # 1️⃣ 处理本次变更（A/M/D/R）
+          git diff --name-status HEAD~1 HEAD -- rules/*.yaml > /tmp/changes.txt || true
 
-          if [ ! -s /tmp/rule_changes.txt ]; then
-            echo "🟢 No rule changes detected"
-            exit 0
+          if [ -s /tmp/changes.txt ]; then
+            while read -r status src dst; do
+              case "$status" in
+                A|M)
+                  ./mihomo convert-ruleset domain yaml "$src" "rules_mrs/$(basename "$src" .yaml).mrs"
+                  ;;
+                D)
+                  rm -f "rules_mrs/$(basename "$src" .yaml).mrs"
+                  ;;
+                R*)
+                  rm -f "rules_mrs/$(basename "$src" .yaml).mrs"
+                  ./mihomo convert-ruleset domain yaml "$dst" "rules_mrs/$(basename "$dst" .yaml).mrs"
+                  ;;
+              esac
+            done < /tmp/changes.txt
           fi
 
-          echo "📄 Rule changes:"
-          cat /tmp/rule_changes.txt
+          # 2️⃣ 自愈检查：rules 和 rules_mrs 是否一一对应
+          NEED_FULL_SYNC=0
+          for y in rules/*.yaml; do
+            m="rules_mrs/$(basename "$y" .yaml).mrs"
+            if [ ! -f "$m" ]; then
+              echo "⚠️ Missing $m"
+              NEED_FULL_SYNC=1
+            fi
+          done
 
-          while read -r status src dst; do
-            case "$status" in
-              A|M)
-                name=$(basename "$src" .yaml)
-                out="rules_mrs/${name}.mrs"
-                echo "🔄 $src -> $out"
-                ./mihomo convert-ruleset domain yaml "$src" "$out"
-                ;;
-              D)
-                name=$(basename "$src" .yaml)
-                out="rules_mrs/${name}.mrs"
-                if [ -f "$out" ]; then
-                  echo "🗑 Delete $out"
-                  rm -f "$out"
-                fi
-                ;;
-              R*)
-                old="$src"
-                new="$dst"
+          if [ "$NEED_FULL_SYNC" -eq 1 ]; then
+            echo "🔁 Full resync triggered"
+            rm -f rules_mrs/*.mrs
+            for y in rules/*.yaml; do
+              ./mihomo convert-ruleset domain yaml "$y" "rules_mrs/$(basename "$y" .yaml).mrs"
+            done
+          fi
 
-                old_name=$(basename "$old" .yaml)
-                new_name=$(basename "$new" .yaml)
-
-                old_out="rules_mrs/${old_name}.mrs"
-                new_out="rules_mrs/${new_name}.mrs"
-
-                echo "🔁 Rename $old -> $new"
-
-                if [ -f "$old_out" ]; then
-                  echo "🗑 Remove old $old_out"
-                  rm -f "$old_out"
-                fi
-
-                echo "🔄 Generate $new_out"
-                ./mihomo convert-ruleset domain yaml "$new" "$new_out"
-                ;;
-            esac
-          done < /tmp/rule_changes.txt
-
-          echo "✅ rules_mrs sync finished"
-          ls -lh rules_mrs
-
-      # 5️⃣ 安全提交（不会再 fetch first）
       - name: Commit and push
         run: |
           set -e

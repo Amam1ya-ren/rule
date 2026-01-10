@@ -16,7 +16,7 @@ on:
 
 env:
   # 固定版本，稳定 + cache 永不乱
-  MIHOMO_VERSION: v1.19.0
+  MIHOMO_VERSION: v1.19.18
 
 jobs:
   convert:

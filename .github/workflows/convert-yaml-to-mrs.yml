@@ -3,7 +3,7 @@ name: Convert YAML rules to MRS
 permissions:
   contents: write
 
-# 新 push 会取消旧的运行，避免排队等待
+# 新 push 会自动取消旧任务，避免排队
 concurrency:
   group: rules-convert
   cancel-in-progress: true
@@ -15,21 +15,21 @@ on:
       - "rules/*.yaml"
 
 env:
-  # 固定 mihomo 版本，避免 API + cache 失效
-  MIHOMO_VERSION: v1.19.18
+  # 固定版本，稳定 + cache 永不乱
+  MIHOMO_VERSION: v1.19.0
 
 jobs:
   convert:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout（只取必要历史）
+      # 1️⃣ Checkout（最小历史即可）
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      # 2️⃣ 缓存 mihomo 二进制
+      # 2️⃣ 缓存 mihomo
       - name: Cache mihomo binary
         id: cache-mihomo
         uses: actions/cache@v4
@@ -42,20 +42,20 @@ jobs:
         if: steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
           set -e
-          echo "📦 Downloading mihomo $MIHOMO_VERSION"
+          echo "📦 Downloading mihomo ${MIHOMO_VERSION}"
           wget -q https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           gunzip mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           mv mihomo-linux-amd64-${MIHOMO_VERSION} mihomo
           chmod +x mihomo
           ./mihomo -v
 
-      # 4️⃣ 仅转换变动的 rules
+      # 4️⃣ 仅转换本次变动的 rules
       - name: Convert changed YAML rules to MRS
         run: |
           set -e
           mkdir -p rules_mrs
 
-          # 只处理本次提交中变动的 rules
+          # 只找本次提交变动的 yaml
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- rules/*.yaml || true)
 
           if [ -z "$CHANGED_FILES" ]; then
@@ -73,7 +73,7 @@ jobs:
           echo "✅ Conversion finished"
           ls -lh rules_mrs
 
-      # 5️⃣ 提交并推送结果
+      # 5️⃣ 提交并安全推送（解决你遇到的 push 冲突）
       - name: Commit and push
         run: |
           set -e
@@ -88,4 +88,7 @@ jobs:
           fi
 
           git commit -m "chore: convert YAML rules to MRS"
-          git push
+
+          # 🔑 关键：先 rebase 再 push，避免被拒绝
+          git pull --rebase origin main
+          git push origin main

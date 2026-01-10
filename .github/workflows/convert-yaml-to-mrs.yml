@@ -3,7 +3,7 @@ name: Convert YAML rules to MRS
 permissions:
   contents: write
 
-# 新 push 会自动取消旧任务，避免排队
+# 连续 push 自动取消旧任务
 concurrency:
   group: rules-convert
   cancel-in-progress: true
@@ -15,7 +15,7 @@ on:
       - "rules/*.yaml"
 
 env:
-  # 固定版本，稳定 + cache 永不乱
+  # 固定版本，避免 API / cache 乱跳
   MIHOMO_VERSION: v1.19.18
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout（最小历史即可）
+      # 1️⃣ Checkout（足够 diff 用）
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -49,31 +49,66 @@ jobs:
           chmod +x mihomo
           ./mihomo -v
 
-      # 4️⃣ 仅转换本次变动的 rules
-      - name: Convert changed YAML rules to MRS
+      # 4️⃣ 处理新增 / 修改 / 删除 / 重命名（关键）
+      - name: Sync rules_mrs with rules (A/M/D/R supported)
         run: |
           set -e
           mkdir -p rules_mrs
 
-          # 只找本次提交变动的 yaml
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- rules/*.yaml || true)
+          # 取变更类型：A M D R
+          git diff --name-status HEAD~1 HEAD -- rules/*.yaml > /tmp/rule_changes.txt || true
 
-          if [ -z "$CHANGED_FILES" ]; then
+          if [ ! -s /tmp/rule_changes.txt ]; then
             echo "🟢 No rule changes detected"
             exit 0
           fi
 
-          for file in $CHANGED_FILES; do
-            name=$(basename "$file" .yaml)
-            out="rules_mrs/${name}.mrs"
-            echo "🔄 $file -> $out"
-            ./mihomo convert-ruleset domain yaml "$file" "$out"
-          done
+          echo "📄 Rule changes:"
+          cat /tmp/rule_changes.txt
 
-          echo "✅ Conversion finished"
+          while read -r status src dst; do
+            case "$status" in
+              A|M)
+                name=$(basename "$src" .yaml)
+                out="rules_mrs/${name}.mrs"
+                echo "🔄 $src -> $out"
+                ./mihomo convert-ruleset domain yaml "$src" "$out"
+                ;;
+              D)
+                name=$(basename "$src" .yaml)
+                out="rules_mrs/${name}.mrs"
+                if [ -f "$out" ]; then
+                  echo "🗑 Delete $out"
+                  rm -f "$out"
+                fi
+                ;;
+              R*)
+                old="$src"
+                new="$dst"
+
+                old_name=$(basename "$old" .yaml)
+                new_name=$(basename "$new" .yaml)
+
+                old_out="rules_mrs/${old_name}.mrs"
+                new_out="rules_mrs/${new_name}.mrs"
+
+                echo "🔁 Rename $old -> $new"
+
+                if [ -f "$old_out" ]; then
+                  echo "🗑 Remove old $old_out"
+                  rm -f "$old_out"
+                fi
+
+                echo "🔄 Generate $new_out"
+                ./mihomo convert-ruleset domain yaml "$new" "$new_out"
+                ;;
+            esac
+          done < /tmp/rule_changes.txt
+
+          echo "✅ rules_mrs sync finished"
           ls -lh rules_mrs
 
-      # 5️⃣ 提交并安全推送（解决你遇到的 push 冲突）
+      # 5️⃣ 安全提交（不会再 fetch first）
       - name: Commit and push
         run: |
           set -e
@@ -87,8 +122,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: convert YAML rules to MRS"
-
-          # 🔑 关键：先 rebase 再 push，避免被拒绝
+          git commit -m "chore: sync rules_mrs"
           git pull --rebase origin main
           git push origin main

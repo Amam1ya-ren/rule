@@ -4,7 +4,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: rules-convert-${{ github.ref }}
+  group: rules-convert
   cancel-in-progress: false
 
 on:
@@ -25,8 +25,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}  # 🔑 使用 PAT 替代 GITHUB_TOKEN
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Cache mihomo binary
         id: cache-mihomo
@@ -43,76 +42,36 @@ jobs:
           mv mihomo-linux-amd64-${MIHOMO_VERSION} mihomo
           chmod +x mihomo
 
-      - name: Convert rules (incremental + self-healing)
+      - name: Convert all YAML rules to MRS
         run: |
           set -e
           mkdir -p rules_mrs
           
-          # 🔧 修复：获取触发此工作流的实际变更文件
-          CHANGED_FILES=""
+          echo "🔄 Converting all YAML files to MRS..."
           
-          # 方法1: 从 GitHub 事件获取变更文件（最可靠）
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # 获取此次 push 中所有变更的 YAML 文件
-            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} -- rules/*.yaml || echo "")
-          fi
-          
-          # 方法2: 如果是手动触发或上面失败，则检查所有 YAML 文件的时间戳
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "ℹ️ Unable to detect changes from git, checking file timestamps..."
-            # 找出所有需要更新的文件（YAML 比 MRS 新）
-            for yaml_file in rules/*.yaml; do
-              mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
-              if [ ! -f "$mrs_file" ] || [ "$yaml_file" -nt "$mrs_file" ]; then
-                CHANGED_FILES="$CHANGED_FILES$yaml_file"$'\n'
-              fi
-            done
-          fi
-          
-          # 处理变更的文件
-          if [ -n "$CHANGED_FILES" ]; then
-            echo "📝 Changed files:"
-            echo "$CHANGED_FILES"
-            echo "$CHANGED_FILES" | while IFS= read -r yaml_file; do
-              [ -z "$yaml_file" ] && continue
-              if [ -f "$yaml_file" ]; then
-                mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
-                echo "🔄 Converting: $yaml_file -> $mrs_file"
-                ./mihomo convert-ruleset domain yaml "$yaml_file" "$mrs_file"
-              fi
-            done
-          else
-            echo "ℹ️ No changed files detected"
-          fi
-          
-          # 自愈检查：确保所有 YAML 都有对应的 MRS
-          echo "🔍 Running self-healing check..."
-          HEALED_COUNT=0
-          
+          # 直接转换所有 YAML 文件（简单可靠）
+          CONVERTED=0
           for yaml_file in rules/*.yaml; do
+            [ -f "$yaml_file" ] || continue
+            
             mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
-            if [ ! -f "$mrs_file" ]; then
-              echo "⚠️  Missing: $mrs_file (creating...)"
-              ./mihomo convert-ruleset domain yaml "$yaml_file" "$mrs_file"
-              HEALED_COUNT=$((HEALED_COUNT + 1))
-            fi
+            echo "  → Converting: $(basename "$yaml_file")"
+            
+            ./mihomo convert-ruleset domain yaml "$yaml_file" "$mrs_file"
+            CONVERTED=$((CONVERTED + 1))
           done
           
-          # 清理孤立的 MRS 文件
+          # 清理孤立的 MRS 文件（对应的 YAML 已删除）
           for mrs_file in rules_mrs/*.mrs; do
             [ -f "$mrs_file" ] || continue
             yaml_file="rules/$(basename "$mrs_file" .mrs).yaml"
             if [ ! -f "$yaml_file" ]; then
-              echo "🗑️  Removing orphaned: $mrs_file"
+              echo "  🗑️  Removing orphaned: $(basename "$mrs_file")"
               rm -f "$mrs_file"
             fi
           done
           
-          if [ $HEALED_COUNT -eq 0 ]; then
-            echo "✅ All rules are in sync"
-          else
-            echo "🔧 Self-healed $HEALED_COUNT missing files"
-          fi
+          echo "✅ Converted $CONVERTED YAML files"
 
       - name: Commit and push changes
         run: |
@@ -122,37 +81,25 @@ jobs:
           git add rules_mrs/
           
           if git diff --staged --quiet; then
-            echo "✅ No changes to commit (already up to date)"
+            echo "✅ No changes to commit"
             exit 0
           fi
           
-          echo "📊 Changes to commit:"
+          echo "📊 Changes:"
           git diff --staged --stat
           
-          git commit -m "chore: update MRS files [skip ci]" \
-                     -m "Auto-generated from rules/*.yaml" \
-                     -m "Triggered by: ${{ github.event.head_commit.message }}"
+          git commit -m "chore: update MRS files [skip ci]"
           
-          # 推送重试逻辑
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "🚀 Pushing changes (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-            
-            if git push origin main; then
-              echo "✅ Successfully pushed changes"
+          # 重试推送
+          for i in {1..3}; do
+            if git push; then
+              echo "✅ Pushed successfully"
               exit 0
             fi
-            
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "⚠️  Push failed, pulling latest changes..."
-              git pull --rebase origin main
-              sleep 2
-            fi
+            echo "⚠️  Retry $i/3..."
+            git pull --rebase
+            sleep 2
           done
           
-          echo "❌ Failed to push after $MAX_RETRIES attempts"
+          echo "❌ Push failed"
           exit 1

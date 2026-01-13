@@ -3,15 +3,18 @@ name: Convert YAML rules to MRS
 permissions:
   contents: write
 
+# 改进1: 使用更细粒度的并发控制
 concurrency:
-  group: rules-convert
-  cancel-in-progress: true
+  group: rules-convert-${{ github.ref }}
+  cancel-in-progress: false  # 不取消，让任务排队执行
 
 on:
   workflow_dispatch:
   push:
     paths:
       - "rules/*.yaml"
+    branches:
+      - main  # 明确指定分支
 
 env:
   MIHOMO_VERSION: v1.19.18
@@ -19,12 +22,12 @@ env:
 jobs:
   convert:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0  # 获取完整历史，避免 rebase 问题
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache mihomo binary
         id: cache-mihomo
@@ -36,69 +39,111 @@ jobs:
       - name: Download mihomo
         if: steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
-          set -e
           wget -q https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           gunzip mihomo-linux-amd64-${MIHOMO_VERSION}.gz
           mv mihomo-linux-amd64-${MIHOMO_VERSION} mihomo
           chmod +x mihomo
 
-      # ⭐ 核心：增量 + 自愈
-      - name: Sync rules_mrs with rules (self-healing)
+      # 改进2: 更智能的增量转换
+      - name: Convert rules (incremental + self-healing)
         run: |
           set -e
           mkdir -p rules_mrs
-
-          # 1️⃣ 处理本次变更（A/M/D/R）
-          git diff --name-status HEAD~1 HEAD -- rules/*.yaml > /tmp/changes.txt || true
-
-          if [ -s /tmp/changes.txt ]; then
-            while read -r status src dst; do
-              case "$status" in
-                A|M)
-                  ./mihomo convert-ruleset domain yaml "$src" "rules_mrs/$(basename "$src" .yaml).mrs"
-                  ;;
-                D)
-                  rm -f "rules_mrs/$(basename "$src" .yaml).mrs"
-                  ;;
-                R*)
-                  rm -f "rules_mrs/$(basename "$src" .yaml).mrs"
-                  ./mihomo convert-ruleset domain yaml "$dst" "rules_mrs/$(basename "$dst" .yaml).mrs"
-                  ;;
-              esac
-            done < /tmp/changes.txt
+          
+          # 检测变更的文件
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- rules/*.yaml || echo "")
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "ℹ️ No YAML files changed in this commit"
+            # 仍然执行自愈检查
+            CHANGED_FILES=""
+          else
+            echo "📝 Changed files:"
+            echo "$CHANGED_FILES"
           fi
-
-          # 2️⃣ 自愈检查：rules 和 rules_mrs 是否一一对应
-          NEED_FULL_SYNC=0
-          for y in rules/*.yaml; do
-            m="rules_mrs/$(basename "$y" .yaml).mrs"
-            if [ ! -f "$m" ]; then
-              echo "⚠️ Missing $m"
-              NEED_FULL_SYNC=1
-            fi
-          done
-
-          if [ "$NEED_FULL_SYNC" -eq 1 ]; then
-            echo "🔁 Full resync triggered"
-            rm -f rules_mrs/*.mrs
-            for y in rules/*.yaml; do
-              ./mihomo convert-ruleset domain yaml "$y" "rules_mrs/$(basename "$y" .yaml).mrs"
+          
+          # 处理变更的文件
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "$CHANGED_FILES" | while read -r yaml_file; do
+              if [ -f "$yaml_file" ]; then
+                mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
+                echo "🔄 Converting $yaml_file -> $mrs_file"
+                ./mihomo convert-ruleset domain yaml "$yaml_file" "$mrs_file"
+              fi
             done
           fi
-
-      - name: Commit and push
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add rules_mrs
-
-          if git diff --staged --quiet; then
-            echo "📝 No changes to commit"
-            exit 0
+          
+          # 自愈检查：确保所有 YAML 都有对应的 MRS
+          echo "🔍 Running self-healing check..."
+          MISSING_COUNT=0
+          
+          for yaml_file in rules/*.yaml; do
+            mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
+            if [ ! -f "$mrs_file" ]; then
+              echo "⚠️  Missing: $mrs_file (creating...)"
+              ./mihomo convert-ruleset domain yaml "$yaml_file" "$mrs_file"
+              MISSING_COUNT=$((MISSING_COUNT + 1))
+            fi
+          done
+          
+          # 清理孤立的 MRS 文件（YAML 已删除）
+          for mrs_file in rules_mrs/*.mrs; do
+            [ -f "$mrs_file" ] || continue
+            yaml_file="rules/$(basename "$mrs_file" .mrs).yaml"
+            if [ ! -f "$yaml_file" ]; then
+              echo "🗑️  Removing orphaned: $mrs_file"
+              rm -f "$mrs_file"
+            fi
+          done
+          
+          if [ $MISSING_COUNT -eq 0 ]; then
+            echo "✅ All rules are in sync"
+          else
+            echo "🔧 Self-healed $MISSING_COUNT missing files"
           fi
 
-          git commit -m "chore: sync rules_mrs"
-          git pull --rebase origin main
-          git push origin main
+      # 改进3: 更可靠的提交逻辑
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add rules_mrs/
+          
+          # 检查是否有实际变更
+          if git diff --staged --quiet; then
+            echo "✅ No changes to commit (already up to date)"
+            exit 0
+          fi
+          
+          # 显示变更摘要
+          echo "📊 Changes to commit:"
+          git diff --staged --stat
+          
+          # 提交
+          git commit -m "chore: update MRS files [skip ci]" \
+                     -m "Auto-generated from rules/*.yaml"
+          
+          # 改进的推送逻辑（最多重试3次）
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "🚀 Pushing changes (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+            
+            if git push origin main; then
+              echo "✅ Successfully pushed changes"
+              exit 0
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "⚠️  Push failed, pulling latest changes..."
+              git pull --rebase origin main
+              sleep 2
+            fi
+          done
+          
+          echo "❌ Failed to push after $MAX_RETRIES attempts"
+          exit 1

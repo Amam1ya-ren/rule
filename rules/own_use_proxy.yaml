@@ -1,4 +1,5 @@
 payload:
   - '+.nexus-cdn.com'
-  - 'static.m-team.cc'
+  - 'static.m-team.cc'  
+  - 'unpkg.com'
 

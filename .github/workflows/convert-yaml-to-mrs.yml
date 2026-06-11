@@ -48,7 +48,7 @@ jobs:
           gzip -dc mihomo.gz > "$MIHOMO_BIN"
           chmod +x "$MIHOMO_BIN"
 
-      - name: Convert YAML rules to MRS
+      - name: Convert YAML IP-CIDR rules to MRS
         shell: bash
         run: |
           set -euo pipefail
@@ -66,7 +66,7 @@ jobs:
           for yaml_file in "${yaml_files[@]}"; do
             mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
             echo "Converting $yaml_file -> $mrs_file"
-            "$MIHOMO_BIN" convert-ruleset domain yaml "$yaml_file" "$mrs_file"
+            "$MIHOMO_BIN" convert-ruleset ipcidr yaml "$yaml_file" "$mrs_file"
           done
 
           echo "Converted ${#yaml_files[@]} YAML rule file(s)."

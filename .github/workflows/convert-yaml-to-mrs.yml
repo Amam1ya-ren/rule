@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "rules/*.yaml"
+      - "rules/**/*.yaml"
       - ".github/workflows/convert-yaml-to-mrs.yml"
 
 permissions:
@@ -48,28 +48,37 @@ jobs:
           gzip -dc mihomo.gz > "$MIHOMO_BIN"
           chmod +x "$MIHOMO_BIN"
 
-      - name: Convert YAML IP-CIDR rules to MRS
+      - name: Convert YAML rules to MRS
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
 
-          yaml_files=(rules/*.yaml)
-          if (( ${#yaml_files[@]} == 0 )); then
-            echo "No YAML rule files found in rules/."
+          domain_files=(rules/domain/*.yaml)
+          ipcidr_files=(rules/ipcidr/*.yaml)
+          total_files=$(( ${#domain_files[@]} + ${#ipcidr_files[@]} ))
+
+          if (( total_files == 0 )); then
+            echo "No YAML rule files found in rules/domain or rules/ipcidr."
             exit 1
           fi
 
           rm -rf rules_mrs
           mkdir -p rules_mrs
 
-          for yaml_file in "${yaml_files[@]}"; do
+          for yaml_file in "${domain_files[@]}"; do
+            mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
+            echo "Converting $yaml_file -> $mrs_file"
+            "$MIHOMO_BIN" convert-ruleset domain yaml "$yaml_file" "$mrs_file"
+          done
+
+          for yaml_file in "${ipcidr_files[@]}"; do
             mrs_file="rules_mrs/$(basename "$yaml_file" .yaml).mrs"
             echo "Converting $yaml_file -> $mrs_file"
             "$MIHOMO_BIN" convert-ruleset ipcidr yaml "$yaml_file" "$mrs_file"
           done
 
-          echo "Converted ${#yaml_files[@]} YAML rule file(s)."
+          echo "Converted ${total_files} YAML rule file(s)."
 
       - name: Commit generated MRS files
         shell: bash

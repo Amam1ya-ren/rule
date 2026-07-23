@@ -38,3 +38,5 @@ payload:
   - "+.deepseek.com"
   - "invite.linuxdo.org"
   - '+.xn--ngstr-lra8j.com'
+  - 'static.rust-lang.org'
+  - 'nodejs.org'

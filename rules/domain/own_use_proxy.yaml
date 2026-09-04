@@ -11,3 +11,4 @@ payload:
   - "challenges.cloudflare.com"
   - '+.xn--9kqs1lo79d.cc'
   - 'cdn.jsdelivr.net'
+  - 'prod-rel-ffc-ccm.oobesaas.adobe.com'
